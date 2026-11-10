@@ -52,9 +52,11 @@ object/file storage; the database stores metadata and a storage key.
   `historical_defects`    Normalized source issue Proposed
                           record                  
 
-  `defect_chunks`         Chunk text, type and    Proposed;
-                          embedding               chunking/embedding
-                                                  described
+  `defect_chunks`         Chunk text, type and    Proposed; stores text
+                          parent defect           only
+
+  `chunk_embeddings`     Versioned vector for    Proposed; one row per
+                          a chunk and model       chunk/model revision
 
   `diagnosis_runs`        One execution of the    Planned
                           five-agent workflow     
@@ -62,15 +64,22 @@ object/file storage; the database stores metadata and a storage key.
   `agent_results`         Versioned per-agent     Planned
                           outputs and status      
 
-  `retrieved_evidence`    Exact chunk retrieval   Planned
-                          per run with rank and   
-                          metric                  
+  `retrieval_snapshots`   One retrieval attempt   Planned; normally one
+                          and its shared result   successful snapshot/run
+
+  `retrieved_evidence`    Exact chunks within a   Planned; belongs to a
+                          retrieval snapshot      snapshot, shared by agents                  
 
   `recommendations`       Developer-facing        Planned
                           remediation suggestions 
 
-  `model_registry`        Model and prompt        Optional proposed table
-                          configuration identity  for traceability
+  `model_registry`        Embedding/LLM model     Proposed; required for
+                          identity and revision   embedding provenance
+
+  `recommendation_evidence`
+                          Relational link between Planned; enforces that
+                          recommendations and    cited evidence exists
+                          retrieved evidence
   -----------------------------------------------------------------------
 
 ## 3. Mermaid ER Diagram
@@ -81,20 +90,28 @@ erDiagram
     BUG_REPORTS ||--o{ ATTACHMENTS : has
     BUG_REPORTS ||--o{ DIAGNOSIS_RUNS : analyzed_by
     DIAGNOSIS_RUNS ||--o{ AGENT_RESULTS : contains
-    DIAGNOSIS_RUNS ||--o{ RETRIEVED_EVIDENCE : retrieves
     DIAGNOSIS_RUNS ||--o{ RECOMMENDATIONS : produces
+    AGENT_RESULTS ||--o{ RECOMMENDATIONS : generates
     DATASET_SOURCES ||--o{ HISTORICAL_DEFECTS : provides
     HISTORICAL_DEFECTS ||--o{ DEFECT_CHUNKS : split_into
+    DEFECT_CHUNKS ||--o{ CHUNK_EMBEDDINGS : embedded_as
+    MODEL_REGISTRY ||--o{ CHUNK_EMBEDDINGS : identifies
+    DIAGNOSIS_RUNS ||--o{ RETRIEVAL_SNAPSHOTS : attempts
+    RETRIEVAL_SNAPSHOTS ||--o{ RETRIEVED_EVIDENCE : contains
     HISTORICAL_DEFECTS ||--o{ RETRIEVED_EVIDENCE : referenced_by
     DEFECT_CHUNKS ||--o{ RETRIEVED_EVIDENCE : cited_as
     MODEL_REGISTRY ||--o{ AGENT_RESULTS : identifies
-    MODEL_REGISTRY ||--o{ DEFECT_CHUNKS : embeds_with
+    MODEL_REGISTRY ||--o{ RETRIEVAL_SNAPSHOTS : embeds_query_with
+    RECOMMENDATIONS ||--o{ RECOMMENDATION_EVIDENCE : cites
+    RETRIEVED_EVIDENCE ||--o{ RECOMMENDATION_EVIDENCE : supports
 ```
 
-`retrieved_evidence` references both the parent historical defect and
-the exact chunk. The pair must be consistent; enforce through
-application validation or a composite foreign key if the schema adopts a
-matching unique key.
+`retrieved_evidence` belongs to a `retrieval_snapshots` row and references
+both the parent historical defect and exact chunk. Enforce that the chunk
+belongs to the referenced defect with a composite foreign key.
+`recommendation_evidence` provides relational, foreign-key-checked links
+from recommendations to evidence; do not use JSON arrays as the only
+source of evidence references.
 
 ## 4. Table Definitions
 
@@ -311,43 +328,57 @@ Do not store API keys or secret configuration here.
 
 ### 4.7 `defect_chunks`
 
-Purpose: searchable, provenance-linked text segments.
+Purpose: store normalized, provenance-linked text segments independently
+from any embedding model.
 
-  --------------------------------------------------------------------------
-  Column                   PostgreSQL type         Constraints / default
-  ------------------------ ----------------------- -------------------------
-  `id`                     `UUID`                  PK
+| Column | PostgreSQL type | Constraints / default |
+|---|---|---|
+| `id` | `UUID` | PK |
+| `historical_defect_id` | `UUID` | FK `historical_defects.id` ON DELETE CASCADE, NOT NULL |
+| `chunk_type` | `VARCHAR(32)` | NOT NULL |
+| `chunk_index` | `INTEGER` | NOT NULL, CHECK `>= 0` |
+| `text_content` | `TEXT` | NOT NULL, non-empty after normalization |
+| `content_hash` | `CHAR(64)` | NOT NULL |
+| `token_count` | `INTEGER` | NULL, CHECK `> 0` when present |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL, `now()` |
 
-  `historical_defect_id`   `UUID`                  FK
-                                                   `historical_defects.id`
-                                                   ON DELETE CASCADE
+Unique: `(historical_defect_id, chunk_type, chunk_index)`. Also create
+`UNIQUE (id, historical_defect_id)` to support the composite foreign key
+from `retrieved_evidence`. Chunk text is immutable for a given content
+version; changed source text should create a new ingestion/version
+record or a controlled replacement with re-embedding.
 
-  `chunk_type`             `VARCHAR(32)`           NOT NULL
+### 4.7.1 `chunk_embeddings` — selected design
 
-  `chunk_index`            `INTEGER`               NOT NULL, CHECK `>= 0`
+**Decision: use a separate `chunk_embeddings` table.** Do not put a vector
+column or embedding-model foreign key on `defect_chunks`. This separates
+canonical chunk text from model-specific representations and allows
+multiple model revisions to coexist during re-indexing.
 
-  `text_content`           `TEXT`                  NOT NULL
+| Column | PostgreSQL type | Constraints / default |
+|---|---|---|
+| `id` | `UUID` | PK |
+| `chunk_id` | `UUID` | FK `defect_chunks.id` ON DELETE CASCADE, NOT NULL |
+| `embedding_model_id` | `UUID` | FK `model_registry.id`, NOT NULL |
+| `embedding` | `VECTOR(N)` | NOT NULL; `N` is fixed by the selected model for this index/table |
+| `embedding_hash` | `CHAR(64)` | NOT NULL; hash of normalized input/config identity |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL, `now()` |
 
-  `embedding`              `VECTOR(N)`             NULL until embedded; `N`
-                                                   unresolved
+Unique: `(chunk_id, embedding_model_id)`. The model registry row must
+identify `model_kind='embedding'` and `vector_dimensions=N`; enforce this
+with application validation or a database trigger because a normal CHECK
+constraint cannot compare values across tables.
 
-  `embedding_model_id`     `UUID`                  FK `model_registry.id`,
-                                                   NULL until embedded
+**Dimension policy:** `N` remains a placeholder until the embedding
+model is selected and a real output is measured. A single pgvector
+`VECTOR(N)` column and its ANN index must use one consistent dimension.
+For an upgrade with the same dimension, retain separate model IDs/rows
+in this table. For a different dimension, use a separate versioned
+table/partition or a deliberate reindex migration with its own matching
+vector column and ANN index; do not mix dimensions in one ANN index.
 
-  `created_at`             `TIMESTAMPTZ`           NOT NULL, `now()`
-  --------------------------------------------------------------------------
-
-Unique:
-`(historical_defect_id, chunk_type, chunk_index, embedding_model_id)`
-where nullable uniqueness behavior is considered. For a single active
-embedding space, prefer a separate `chunk_embeddings` table keyed by
-`(chunk_id, embedding_model_id)` to support model migrations without
-overwriting old vectors.
-
-**Dimension decision:** `VECTOR(N)` is a migration placeholder only.
-Choose `N` from the selected embedding model output and verify at
-runtime. Do not create a dimension-specific ANN index until `N` is
-fixed.
+Do not create an HNSW/IVFFlat index until the model, dimension, distance
+metric, corpus size, and recall baseline have been verified.
 
 ### 4.8 `diagnosis_runs`
 
@@ -406,6 +437,10 @@ Purpose: per-agent request/response status and version traceability.
 
   `execution_order`       `SMALLINT`              NOT NULL
 
+  `attempt_number`        `SMALLINT`              NOT NULL, CHECK `> 0`;
+                                                  starts at 1 per agent
+                                                  execution slot
+
   `status`                `VARCHAR(24)`           NOT NULL
 
   `input_snapshot`        `JSONB`                 NOT NULL
@@ -428,42 +463,57 @@ Purpose: per-agent request/response status and version traceability.
   `created_at`            `TIMESTAMPTZ`           NOT NULL, `now()`
   -----------------------------------------------------------------------
 
-Unique: `(diagnosis_run_id, agent_name, execution_order)`; add attempt
-number if retries must be individually recorded.
+Unique: `(diagnosis_run_id, agent_name, execution_order, attempt_number)`.
+Each retry is a new row with an incremented attempt number; never
+overwrite the failed attempt. Add `UNIQUE (id, diagnosis_run_id)` for
+composite ownership checks from dependent tables. A retry policy must
+be bounded and must distinguish retryable provider/network failures from
+non-retryable validation or policy failures.
 
-### 4.10 `retrieved_evidence`
+### 4.10 `retrieval_snapshots`
 
-Purpose: exact record of what was retrieved for a Diagnosis Run.
+Purpose: persist each orchestrator-coordinated retrieval attempt. The
+normal path creates one snapshot per diagnosis run. A second snapshot is
+permitted only for an explicitly recorded retry or a documented
+additional query; agents do not initiate retrieval independently.
 
-  ---------------------------------------------------------------------------
-  Column                   PostgreSQL type         Constraints / default
-  ------------------------ ----------------------- --------------------------
-  `id`                     `UUID`                  PK
+| Column | PostgreSQL type | Constraints / default |
+|---|---|---|
+| `id` | `UUID` | PK |
+| `diagnosis_run_id` | `UUID` | FK `diagnosis_runs.id` ON DELETE CASCADE, NOT NULL |
+| `attempt_number` | `SMALLINT` | NOT NULL, CHECK `> 0` |
+| `status` | `VARCHAR(24)` | NOT NULL; `pending`, `succeeded`, `empty`, `failed` |
+| `embedding_model_id` | `UUID` | FK `model_registry.id`, NOT NULL |
+| `query_hash` | `CHAR(64)` | NOT NULL; hash of redacted/normalized query input |
+| `query_metadata` | `JSONB` | NOT NULL, default `{}`; no secrets/raw sensitive text |
+| `top_k` | `INTEGER` | NOT NULL, CHECK `> 0` |
+| `similarity_metric` | `VARCHAR(40)` | NOT NULL |
+| `retrieval_filter` | `JSONB` | NOT NULL, default `{}` |
+| `started_at` | `TIMESTAMPTZ` | NOT NULL |
+| `finished_at` | `TIMESTAMPTZ` | NULL until terminal |
+| `error_code` | `VARCHAR(80)` | NULL |
+| `error_summary` | `TEXT` | NULL; sanitized |
 
-  `diagnosis_run_id`       `UUID`                  FK `diagnosis_runs.id` ON
-                                                   DELETE CASCADE
+Unique: `(diagnosis_run_id, attempt_number)`. The successful/empty
+snapshot selected by the orchestrator is the canonical evidence set
+passed to Root Cause and Duplicate Detection. Both agents must reference
+the same snapshot ID and evidence IDs.
 
-  `historical_defect_id`   `UUID`                  FK
-                                                   `historical_defects.id`,
-                                                   NOT NULL
+### 4.11 `retrieved_evidence`
 
-  `defect_chunk_id`        `UUID`                  FK `defect_chunks.id`, NOT
-                                                   NULL
+Purpose: immutable ranked evidence rows within one retrieval snapshot.
 
-  `rank`                   `INTEGER`               NOT NULL, CHECK `> 0`
+| Column | PostgreSQL type | Constraints / default |
+|---|---|---|
+| `id` | `UUID` | PK |
+| `retrieval_snapshot_id` | `UUID` | FK `retrieval_snapshots.id` ON DELETE CASCADE, NOT NULL |
+| `historical_defect_id` | `UUID` | FK `historical_defects.id`, NOT NULL |
+| `defect_chunk_id` | `UUID` | NOT NULL; composite FK `(defect_chunk_id, historical_defect_id)` references `defect_chunks(id, historical_defect_id)` |
+| `rank` | `INTEGER` | NOT NULL, CHECK `> 0` |
+| `similarity_value` | `DOUBLE PRECISION` | NOT NULL; finite metric value, not probability |
+| `retrieved_at` | `TIMESTAMPTZ` | NOT NULL, `now()` |
 
-  `similarity_metric`      `VARCHAR(40)`           NOT NULL
-
-  `similarity_value`       `DOUBLE PRECISION`      NOT NULL
-
-  `retrieval_filter`       `JSONB`                 NOT NULL, default `{}`
-
-  `retrieved_at`           `TIMESTAMPTZ`           NOT NULL, `now()`
-  ---------------------------------------------------------------------------
-
-Unique: `(diagnosis_run_id, defect_chunk_id, rank)` as appropriate.
-Persist raw metric semantics: cosine distance is lower-is-better; cosine
-similarity is higher-is-better. Never store a metric as a probability.
+Unique: `(retrieval_snapshot_id, rank)` and `(retrieval_snapshot_id, defect_chunk_id)`. Metric name and filter are snapshot-level fields so all rows in a snapshot share the same metric and filter configuration. Persist metric semantics: cosine distance is lower-is-better; cosine similarity is higher-is-better. Never store a metric as a probability.
 
 ### 4.11 `recommendations`
 
@@ -477,8 +527,11 @@ Purpose: versioned developer-facing suggestions from Remediation Agent.
   `diagnosis_run_id`      `UUID`                  FK `diagnosis_runs.id`
                                                   ON DELETE CASCADE
 
-  `agent_result_id`       `UUID`                  FK `agent_results.id`,
-                                                  NOT NULL
+  `agent_result_id`       `UUID`                  NOT NULL; composite FK
+                                                  `(agent_result_id,
+                                                  diagnosis_run_id)` to
+                                                  `agent_results(id,
+                                                  diagnosis_run_id)`
 
   `rank`                  `INTEGER`               NOT NULL, CHECK `> 0`
 
@@ -489,8 +542,6 @@ Purpose: versioned developer-facing suggestions from Remediation Agent.
   `recommendation_type`   `VARCHAR(40)`           NOT NULL
 
   `basis_hypothesis`      `JSONB`                 NOT NULL, default `{}`
-
-  `evidence_ids`          `JSONB`                 NOT NULL, default `[]`
 
   `assumptions`           `JSONB`                 NOT NULL, default `[]`
 
@@ -507,12 +558,33 @@ Purpose: versioned developer-facing suggestions from Remediation Agent.
 Do not add an `applied_at` field unless an actual, separately authorized
 application workflow is introduced.
 
+### 4.12 `recommendation_evidence`
+
+Purpose: normalized many-to-many links between a recommendation and the
+exact retrieved evidence supporting it.
+
+| Column | PostgreSQL type | Constraints / default |
+|---|---|---|
+| `recommendation_id` | `UUID` | FK `recommendations.id` ON DELETE CASCADE |
+| `retrieved_evidence_id` | `UUID` | FK `retrieved_evidence.id` ON DELETE RESTRICT |
+| `evidence_role` | `VARCHAR(32)` | NOT NULL; e.g. `supports`, `contradicts`, `historical_resolution` |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL, `now()` |
+
+Primary key: `(recommendation_id, retrieved_evidence_id)`. This gives
+recommendation citations referential integrity. The API may serialize
+these references as an array, but the relational table is authoritative.
+Application validation must also ensure a recommendation only cites
+evidence from the same diagnosis run; a composite run-scoped FK can be
+added if this relationship is enforced entirely at the database layer.
+
 ## 5. SQL DDL --- Core Example
 
-The following is a **proposed baseline**, not a replacement for the
-existing `db/schema.sql`. `VECTOR(N)` must be replaced with a verified
-model dimension before applying the vector column/index migration.
-`CITEXT` is optional; use `VARCHAR` if avoiding the extension.
+The following is a **partial proposed baseline**, not a replacement for
+the existing `db/schema.sql`. It illustrates the key constraints for
+model registration, chunk embeddings, retrieval snapshots, evidence
+integrity, agent attempts, and recommendation citations. It is not a
+complete executable migration. `VECTOR(N)` must be replaced with the
+verified model dimension before applying the embedding migration.
 
 ``` sql
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -611,23 +683,130 @@ CREATE TABLE diagnosis_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Model-dependent: replace N only after the embedding model is selected.
--- CREATE TABLE defect_chunks (
---     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
---     historical_defect_id UUID NOT NULL REFERENCES historical_defects(id) ON DELETE CASCADE,
---     chunk_type VARCHAR(32) NOT NULL,
---     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
---     text_content TEXT NOT NULL,
---     embedding VECTOR(N),
---     embedding_model_id UUID,
---     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
---     UNIQUE (historical_defect_id, chunk_type, chunk_index, embedding_model_id)
--- );
+CREATE TABLE model_registry (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_kind VARCHAR(24) NOT NULL CHECK (model_kind IN ('embedding', 'llm', 'prompt')),
+    provider VARCHAR(100),
+    model_name VARCHAR(200) NOT NULL,
+    model_revision VARCHAR(200),
+    prompt_version VARCHAR(100),
+    vector_dimensions INTEGER CHECK (vector_dimensions IS NULL OR vector_dimensions > 0),
+    configuration_hash CHAR(64),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((model_kind = 'embedding' AND vector_dimensions IS NOT NULL)
+        OR (model_kind <> 'embedding' AND vector_dimensions IS NULL))
+);
+
+CREATE TABLE defect_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    historical_defect_id UUID NOT NULL REFERENCES historical_defects(id) ON DELETE CASCADE,
+    chunk_type VARCHAR(32) NOT NULL,
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    text_content TEXT NOT NULL CHECK (length(btrim(text_content)) > 0),
+    content_hash CHAR(64) NOT NULL,
+    token_count INTEGER CHECK (token_count IS NULL OR token_count > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (historical_defect_id, chunk_type, chunk_index),
+    UNIQUE (id, historical_defect_id)
+);
+
+-- Replace N only after selecting and verifying the embedding model.
+CREATE TABLE chunk_embeddings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chunk_id UUID NOT NULL REFERENCES defect_chunks(id) ON DELETE CASCADE,
+    embedding_model_id UUID NOT NULL REFERENCES model_registry(id),
+    embedding VECTOR(N) NOT NULL,
+    embedding_hash CHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (chunk_id, embedding_model_id)
+);
+
+CREATE TABLE retrieval_snapshots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    diagnosis_run_id UUID NOT NULL REFERENCES diagnosis_runs(id) ON DELETE CASCADE,
+    attempt_number SMALLINT NOT NULL CHECK (attempt_number > 0),
+    status VARCHAR(24) NOT NULL CHECK (status IN ('pending', 'succeeded', 'empty', 'failed')),
+    embedding_model_id UUID NOT NULL REFERENCES model_registry(id),
+    query_hash CHAR(64) NOT NULL,
+    query_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    top_k INTEGER NOT NULL CHECK (top_k > 0),
+    similarity_metric VARCHAR(40) NOT NULL,
+    retrieval_filter JSONB NOT NULL DEFAULT '{}'::jsonb,
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ,
+    error_code VARCHAR(80),
+    error_summary TEXT,
+    UNIQUE (diagnosis_run_id, attempt_number)
+);
+
+CREATE TABLE retrieved_evidence (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    retrieval_snapshot_id UUID NOT NULL REFERENCES retrieval_snapshots(id) ON DELETE CASCADE,
+    historical_defect_id UUID NOT NULL REFERENCES historical_defects(id),
+    defect_chunk_id UUID NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    similarity_value DOUBLE PRECISION NOT NULL,
+    retrieved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (defect_chunk_id, historical_defect_id)
+        REFERENCES defect_chunks(id, historical_defect_id),
+    UNIQUE (retrieval_snapshot_id, rank),
+    UNIQUE (retrieval_snapshot_id, defect_chunk_id)
+);
+
+-- Every retry is a separate row; attempt_number starts at 1.
+CREATE TABLE agent_results (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    diagnosis_run_id UUID NOT NULL REFERENCES diagnosis_runs(id) ON DELETE CASCADE,
+    agent_name VARCHAR(40) NOT NULL,
+    execution_order SMALLINT NOT NULL,
+    attempt_number SMALLINT NOT NULL CHECK (attempt_number > 0),
+    status VARCHAR(24) NOT NULL,
+    input_snapshot JSONB NOT NULL,
+    output_payload JSONB,
+    error_code VARCHAR(80),
+    error_summary TEXT,
+    model_registry_id UUID REFERENCES model_registry(id),
+    prompt_version VARCHAR(100),
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (diagnosis_run_id, agent_name, execution_order, attempt_number),
+    UNIQUE (id, diagnosis_run_id)
+);
+
+-- Recommendations should cite evidence through a junction table, not JSON IDs.
+CREATE TABLE recommendations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    diagnosis_run_id UUID NOT NULL REFERENCES diagnosis_runs(id) ON DELETE CASCADE,
+    agent_result_id UUID NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    title VARCHAR(300) NOT NULL,
+    description TEXT NOT NULL,
+    recommendation_type VARCHAR(40) NOT NULL,
+    basis_hypothesis JSONB NOT NULL DEFAULT '{}'::jsonb,
+    assumptions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    risks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    verification_plan JSONB NOT NULL DEFAULT '[]'::jsonb,
+    execution_status VARCHAR(24) NOT NULL DEFAULT 'not_executed',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (id, diagnosis_run_id),
+    FOREIGN KEY (agent_result_id, diagnosis_run_id)
+        REFERENCES agent_results(id, diagnosis_run_id)
+);
+
+CREATE TABLE recommendation_evidence (
+    recommendation_id UUID NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
+    retrieved_evidence_id UUID NOT NULL REFERENCES retrieved_evidence(id) ON DELETE RESTRICT,
+    evidence_role VARCHAR(32) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (recommendation_id, retrieved_evidence_id)
+);
 ```
 
-Add `model_registry`, `agent_results`, `retrieved_evidence` and
-`recommendations` in ordered migrations after deciding exact retry
-semantics and model metadata constraints.
+The remaining tables and constraints shown above are illustrative
+proposed DDL and must be split into dependency-ordered migrations. The
+`VECTOR(N)` placeholder prevents this block from being directly executed
+until the model dimension is finalized.
 
 ## 6. Indexing Strategy
 
@@ -652,13 +831,20 @@ Start with indexes that support demonstrated query patterns:
 
   `defect_chunks`         `(historical_defect_id)`                   Parent lookup
 
+  `chunk_embeddings`      `(embedding_model_id, chunk_id)`            Model-specific vector lookup
+
   `diagnosis_runs`        `(bug_report_id, created_at DESC)`         Run history
 
-  `agent_results`         `(diagnosis_run_id, agent_name)`           Result assembly
+  `agent_results`         `(diagnosis_run_id, agent_name,
+                           execution_order, attempt_number)`          Result assembly
 
-  `retrieved_evidence`    `(diagnosis_run_id, rank)`                 Ordered evidence
+  `retrieval_snapshots`   `(diagnosis_run_id, attempt_number)`       Retrieval attempts
+
+  `retrieved_evidence`    `(retrieval_snapshot_id, rank)`            Ordered evidence
 
   `recommendations`       `(diagnosis_run_id, rank)`                 Ordered recommendations
+
+  `recommendation_evidence` `(retrieved_evidence_id)`                 Evidence citation lookup
   ------------------------------------------------------------------------------------------
 
 ### pgvector index choices
@@ -723,8 +909,10 @@ dimension and model identity; 6. build ANN indexes after data load; 7.
 validate application compatibility; 8. deploy and monitor; 9. retain
 rollback procedure.
 
-Do not silently drop/recreate an embedding column during model upgrades.
-Use versioned embeddings or an explicit reindex migration.
+Do not silently drop/recreate vector data during model upgrades. Use the
+versioned `chunk_embeddings` table for same-dimension model revisions;
+use a separate dimension-specific table/partition or explicit reindex
+migration when vector dimensions change.
 
 ## 10. Backup and Recovery
 
@@ -775,9 +963,10 @@ Use versioned embeddings or an explicit reindex migration.
 
 -   **Embedding dimension:** unresolved until model selection and
     runtime verification. Use `VECTOR(N)` as placeholder only.
--   **Embedding versioning:** decide one active embedding space vs
-    multiple retained versions; separate `chunk_embeddings` is
-    recommended if reindexing without downtime is needed.
+-   **Embedding versioning:** decided for this design: keep vectors in
+    `chunk_embeddings`, separate from `defect_chunks`; one row per chunk
+    and embedding model ID. `VECTOR(N)` remains unresolved until model
+    selection and output-dimension verification.
 -   **Authentication:** current implementation not verified; decide
     local credentials vs external identity.
 -   **ORM:** SQLAlchemy is a candidate, not verified in dependencies.
@@ -786,5 +975,13 @@ Use versioned embeddings or an explicit reindex migration.
 -   **Tenant model:** no tenant entity is included until multi-tenant
     requirements are confirmed.
 -   **Agent result storage:** JSONB preserves evolving agent payloads;
-    promote frequently queried fields to typed columns only when query
-    requirements emerge.
+    each execution attempt is a separate row identified by
+    `(diagnosis_run_id, agent_name, execution_order, attempt_number)`.
+-   **Retrieval ownership:** the orchestrator coordinates one shared
+    retrieval snapshot per normal diagnosis run. Embedding Service creates
+    the query vector; Semantic Retriever performs vector search. Root
+    Cause and Duplicate Detection consume the same snapshot/evidence IDs.
+    Additional retrieval is an explicit, persisted attempt.
+-   **Recommendation evidence:** normalized in
+    `recommendation_evidence`; JSON arrays may be used in API responses
+    but are not the authoritative relational reference.
