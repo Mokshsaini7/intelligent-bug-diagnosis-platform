@@ -1,1 +1,118 @@
 
+# ==========================================
+# ENVIRONMENT VARIABLES & SECRETS
+# ==========================================
+
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+
+# ==========================================
+# PYTHON
+# ==========================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ==========================================
+# VIRTUAL ENVIRONMENTS
+# ==========================================
+
+.venv/
+venv/
+env/
+ENV/
+
+# ==========================================
+# TESTING & COVERAGE
+# ==========================================
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+test-results/
+
+# ==========================================
+# LINTING & TYPE CHECKING
+# ==========================================
+
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.dmypy.json
+
+# ==========================================
+# APPLICATION LOGS
+# ==========================================
+
+*.log
+logs/
+
+# ==========================================
+# UPLOADED FILES & USER DATA
+# ==========================================
+
+storage/uploads/*
+!storage/uploads/.gitkeep
+uploads/
+user_uploads/
+*.db
+*.sqlite
+*.sqlite3
+
+# ==========================================
+# FRONTEND / NODE
+# ==========================================
+
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+.npm/
+.eslintcache
+*.tsbuildinfo
+
+# ==========================================
+# IDE & EDITOR
+# ==========================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# TEMPORARY FILES
+# ==========================================
+
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# ==========================================
+# DOCKER / LOCAL DATA
+# ==========================================
+
+postgres_data/
+docker-data/
