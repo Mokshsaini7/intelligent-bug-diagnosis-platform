@@ -1,0 +1,269 @@
+```tsx
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { Bug, Send } from "lucide-react";
+
+import type { BugSubmissionCreate } from "../../types/submission";
+
+import FormField from "../ui/FormField";
+import TextInput from "../ui/TextInput";
+import TextArea from "../ui/TextArea";
+import SelectInput from "../ui/SelectInput";
+import PrimaryButton from "../ui/PrimaryButton";
+import SecondaryButton from "../ui/SecondaryButton";
+
+interface BugSubmissionFormProps {
+  onSubmit: (data: BugSubmissionCreate) => Promise<void>;
+  onCancel?: () => void;
+}
+
+const severityOptions = [
+  { label: "Low", value: "low" },
+  { label: "Medium", value: "medium" },
+  { label: "High", value: "high" },
+  { label: "Critical", value: "critical" },
+];
+
+function BugSubmissionForm({
+  onSubmit,
+  onCancel,
+}: BugSubmissionFormProps) {
+  const [submitError, setSubmitError] = useState("");
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<BugSubmissionCreate>({
+    defaultValues: {
+      title: "",
+      description: "",
+      programming_language: "",
+      framework: "",
+      environment: "",
+      severity: "medium",
+      steps_to_reproduce: "",
+      expected_behavior: "",
+      actual_behavior: "",
+      stack_trace: "",
+      error_logs: "",
+    },
+  });
+
+  const submitForm = async (data: BugSubmissionCreate) => {
+    setSubmitError("");
+
+    try {
+      await onSubmit(data);
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error
+          ? error.message
+          : "Unable to submit the bug report. Please try again.",
+      );
+    }
+  };
+
+  return (
+    <form
+      onSubmit={handleSubmit(submitForm)}
+      className="space-y-8"
+      noValidate
+    >
+      {submitError && (
+        <div
+          role="alert"
+          className="rounded-xl border border-danger/30 bg-danger/10 p-4 text-sm text-danger"
+        >
+          {submitError}
+        </div>
+      )}
+
+      <section className="space-y-5">
+        <div className="flex items-center gap-3">
+          <div className="rounded-lg bg-primary/10 p-2 text-primary">
+            <Bug size={20} />
+          </div>
+          <div>
+            <h2 className="font-semibold text-foreground">
+              Bug Information
+            </h2>
+            <p className="text-sm text-muted">
+              Describe the issue you encountered.
+            </p>
+          </div>
+        </div>
+
+        <FormField
+          label="Bug Title"
+          required
+          error={errors.title?.message}
+        >
+          <TextInput
+            {...register("title", {
+              required: "Please enter a bug title.",
+              minLength: {
+                value: 5,
+                message: "Title must contain at least 5 characters.",
+              },
+              maxLength: {
+                value: 200,
+                message: "Title cannot exceed 200 characters.",
+              },
+            })}
+            placeholder="e.g. Application crashes during login"
+            error={!!errors.title}
+          />
+        </FormField>
+
+        <FormField
+          label="Description"
+          required
+          error={errors.description?.message}
+          hint="Explain what happened and where the issue occurs."
+        >
+          <TextArea
+            {...register("description", {
+              required: "Please describe the bug.",
+              minLength: {
+                value: 10,
+                message: "Description must contain at least 10 characters.",
+              },
+            })}
+            placeholder="Describe the issue in detail..."
+            rows={5}
+            error={!!errors.description}
+          />
+        </FormField>
+
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+          <FormField label="Programming Language">
+            <TextInput
+              {...register("programming_language")}
+              placeholder="e.g. Python, Java, JavaScript"
+            />
+          </FormField>
+
+          <FormField label="Framework">
+            <TextInput
+              {...register("framework")}
+              placeholder="e.g. React, FastAPI, Django"
+            />
+          </FormField>
+        </div>
+
+        <FormField label="Environment">
+          <TextInput
+            {...register("environment")}
+            placeholder="e.g. Windows 11, Python 3.12, Chrome"
+          />
+        </FormField>
+
+        <FormField
+          label="Severity"
+          required
+          error={errors.severity?.message}
+          hint="Select how seriously this bug affects your application."
+        >
+          <SelectInput
+            {...register("severity")}
+            options={severityOptions}
+            error={!!errors.severity}
+          />
+        </FormField>
+      </section>
+
+      <div className="border-t border-border" />
+
+      <section className="space-y-5">
+        <div>
+          <h2 className="font-semibold text-foreground">
+            Reproduction Details
+          </h2>
+          <p className="mt-1 text-sm text-muted">
+            Help developers understand how to reproduce the issue.
+          </p>
+        </div>
+
+        <FormField label="Steps to Reproduce">
+          <TextArea
+            {...register("steps_to_reproduce")}
+            placeholder={"1. Open the application\n2. Navigate to login\n3. Enter credentials\n4. Observe the error"}
+            rows={5}
+          />
+        </FormField>
+
+        <FormField label="Expected Behavior">
+          <TextArea
+            {...register("expected_behavior")}
+            placeholder="What should have happened?"
+            rows={3}
+          />
+        </FormField>
+
+        <FormField label="Actual Behavior">
+          <TextArea
+            {...register("actual_behavior")}
+            placeholder="What actually happened?"
+            rows={3}
+          />
+        </FormField>
+      </section>
+
+      <div className="border-t border-border" />
+
+      <section className="space-y-5">
+        <div>
+          <h2 className="font-semibold text-foreground">
+            Technical Evidence
+          </h2>
+          <p className="mt-1 text-sm text-muted">
+            Add stack traces or error logs if available.
+          </p>
+        </div>
+
+        <FormField label="Stack Trace">
+          <TextArea
+            {...register("stack_trace")}
+            placeholder="Paste the stack trace here..."
+            rows={5}
+            className="font-mono text-xs"
+          />
+        </FormField>
+
+        <FormField label="Error Logs">
+          <TextArea
+            {...register("error_logs")}
+            placeholder="Paste relevant application logs here..."
+            rows={5}
+            className="font-mono text-xs"
+          />
+        </FormField>
+      </section>
+
+      <div className="flex flex-wrap justify-end gap-3 border-t border-border pt-6">
+        {onCancel && (
+          <SecondaryButton
+            type="button"
+            onClick={onCancel}
+            disabled={isSubmitting}
+          >
+            Cancel
+          </SecondaryButton>
+        )}
+
+        <PrimaryButton
+          type="submit"
+          loading={isSubmitting}
+          disabled={isSubmitting}
+        >
+          <Send size={16} />
+          Submit Bug Report
+        </PrimaryButton>
+      </div>
+    </form>
+  );
+}
+
+export default BugSubmissionForm;
+```
