@@ -1,57 +1,22 @@
-```tsx
-import {
-  BrowserRouter,
-  Navigate,
-  Route,
-  Routes,
-} from "react-router-dom";
-
+import { Navigate, Route, Routes } from "react-router-dom";
 import AppLayout from "./components/layout/AppLayout";
 import DashboardPage from "./pages/DashboardPage";
 import SubmitBugPage from "./pages/SubmitBugPage";
-import BugReportsPage from "./pages/BugReportsPage";
-import BugDetailsPage from "./pages/BugDetailsPage";
+import ReportsPage from "./pages/ReportsPage";
+import SubmissionDetailsPage from "./pages/SubmissionDetailsPage";
 import NotFoundPage from "./pages/NotFoundPage";
 
-function App() {
+export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<AppLayout />}>
-          <Route
-            path="/"
-            element={<Navigate to="/dashboard" replace />}
-          />
-
-          <Route
-            path="/dashboard"
-            element={<DashboardPage />}
-          />
-
-          <Route
-            path="/submit"
-            element={<SubmitBugPage />}
-          />
-
-          <Route
-            path="/reports"
-            element={<BugReportsPage />}
-          />
-
-          <Route
-            path="/reports/:submissionId"
-            element={<BugDetailsPage />}
-          />
-        </Route>
-
-        <Route
-          path="*"
-          element={<NotFoundPage />}
-        />
-      </Routes>
-    </BrowserRouter>
+    <Routes>
+      <Route element={<AppLayout />}>
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/submit" element={<SubmitBugPage />} />
+        <Route path="/reports" element={<ReportsPage />} />
+        <Route path="/reports/:submissionId" element={<SubmissionDetailsPage />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Routes>
   );
 }
-
-export default App;
-```
