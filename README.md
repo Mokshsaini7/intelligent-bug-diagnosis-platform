@@ -62,7 +62,7 @@ tests/           → Testing and evaluation
 ## ⚙️ Getting Started
 
 ```bash
-git clone <your-repository-url>
+git clone <https://github.com/Mokshsaini7/intelligent-bug-diagnosis-platform>
 cd intelligent-bug-diagnosis
 ```
 
